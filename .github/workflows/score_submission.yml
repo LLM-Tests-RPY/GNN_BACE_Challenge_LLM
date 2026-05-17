@@ -16,11 +16,11 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Checkout repository (main)
+      - name: Checkout repository (master)
         uses: actions/checkout@v4
         with:
-          # In pull_request_target, this defaults to the base branch (main)
-          ref: main
+          # In pull_request_target, this defaults to the base branch (master)
+          ref: master
           fetch-depth: 0
 
       - name: Set up Python
@@ -117,11 +117,11 @@ jobs:
         run: |
           echo "Updating leaderboard..."
           
-          # Switch to the main branch to update the leaderboard file
+          # Switch to the master branch to update the leaderboard file
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git pull origin main
+          git checkout master
+          git pull origin master
           
           # Get current time for the timestamp
           TIMESTAMP_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -149,7 +149,7 @@ jobs:
             exit 1
           fi
           git commit -m "Add submission from PR #${{ github.event.number }} to leaderboard"
-          git push origin main
+          git push origin master
           echo "Leaderboard update pushed successfully."
 
       - name: Close Pull Request
@@ -159,6 +159,6 @@ jobs:
           echo "Closing Pull Request to prevent submission file from entering main..."
           gh pr close ${{ github.event.number }} --comment "✅ **Submission Scored!** 
           
-          Your score has been recorded on the [Leaderboard](../blob/main/leaderboard/leaderboard.md).
+          Your score has been recorded on the [Leaderboard](../blob/master/leaderboard/leaderboard.md).
           This PR is now closed to keep the repository clean.
           " --delete-branch
