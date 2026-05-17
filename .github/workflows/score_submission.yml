@@ -1,0 +1,164 @@
+# .github/workflows/score_submission.yml
+
+name: Score Submission
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+    paths:
+      - 'submissions/inbox/*.enc'
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository (main)
+        uses: actions/checkout@v4
+        with:
+          # In pull_request_target, this defaults to the base branch (main)
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Checkout submission from PR
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr_submission
+          sparse-checkout: |
+            submissions/inbox
+
+      - name: Find submission file
+        id: find_file
+        run: |
+          echo "Searching for submission file in pr_submission/submissions/inbox/"
+          # List all files to see what's there
+          ls -R pr_submission/submissions/inbox/
+          
+          # Find the first ENC file in the PR checkout path
+          SUBMISSION_FILE=$(find pr_submission/submissions/inbox/ -name '*.enc' -type f | head -n 1)
+          
+          if [ -z "$SUBMISSION_FILE" ]; then
+            echo "Error: No encrypted submission file found in PR."
+            exit 1
+          fi
+          
+          echo "Found submission file: $SUBMISSION_FILE"
+          echo "submission_file=$SUBMISSION_FILE" >> $GITHUB_OUTPUT
+
+      - name: Decrypt submission
+        id: decrypt
+        env:
+          SUBMISSION_PRIVATE_KEY: ${{ secrets.SUBMISSION_PRIVATE_KEY }}
+        run: |
+          echo "Decrypting submission..."
+          # Run the script from main branch, using the file from the PR
+          python competition/decrypt_submission.py "${{ steps.find_file.outputs.submission_file }}"
+          
+          if [ ! -f "decrypted_submission.csv" ]; then
+            echo "Error: Decryption failed or file not created."
+            exit 1
+          fi
+          
+          echo "Decryption successful."
+          echo "decrypted_file=decrypted_submission.csv" >> $GITHUB_OUTPUT
+
+      - name: Restore test labels
+        env:
+          TEST_LABELS_B64: ${{ secrets.TEST_LABELS_B64 }}
+        run: |
+          echo "Restoring private test labels..."
+          python3 -c "
+          import base64, os
+          data = os.environ['TEST_LABELS_B64']
+          decoded = base64.b64decode(data.strip())
+          with open('data/public/test_labels.csv', 'wb') as f:
+              f.write(decoded)
+          "
+          echo "Test labels restored."
+
+      - name: Check Eligibility
+        run: |
+          echo "Checking eligibility for user: ${{ github.actor }}"
+          python competition/check_eligibility.py "${{ github.actor }}"
+
+      - name: Run evaluation
+        id: evaluate
+        run: |
+          echo "Running evaluation on decrypted file"
+          # Use a python block for cleaner output
+          SCORE=$(python - <<EOF
+          import sys; sys.path.append('competition');
+          from evaluate import run_evaluation;
+          score = run_evaluation('${{ steps.decrypt.outputs.decrypted_file }}');
+          print(f'{score:.6f}')
+          EOF
+          )
+          echo "Evaluation complete. Score: $SCORE"
+          echo "score=$SCORE" >> $GITHUB_OUTPUT
+          
+          # Clean up decrypted file
+          rm "${{ steps.decrypt.outputs.decrypted_file }}"
+
+      - name: Update leaderboard
+        run: |
+          echo "Updating leaderboard..."
+          
+          # Switch to the main branch to update the leaderboard file
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git pull origin main
+          
+          # Get current time for the timestamp
+          TIMESTAMP_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          # Extract team/model name from PR branch or title
+          TEAM_MODEL_NAME="${{ github.head_ref }}"
+          
+          # IMPORTANT: Append the new result in the correct column order
+          # Order: timestamp_utc,team,model,score,notes
+          # Team is now the github.actor to enforce one submission per person
+          echo "${TIMESTAMP_UTC},${{ github.actor }},${TEAM_MODEL_NAME},${{ steps.evaluate.outputs.score }},\"PR #${{ github.event.number }}\"" >> leaderboard/leaderboard.csv
+          
+          echo "Rendering leaderboard HTML and Markdown..."
+          python competition/render_leaderboard.py
+          
+          echo "Current leaderboard CSV content:"
+          cat leaderboard/leaderboard.csv
+
+      - name: Commit and push leaderboard update
+        run: |
+          echo "Committing and pushing leaderboard updates..."
+          git add leaderboard/leaderboard.csv leaderboard/leaderboard.md docs/leaderboard.html
+          if git diff --staged --quiet; then
+            echo "No changes to commit. Something went wrong."
+            exit 1
+          fi
+          git commit -m "Add submission from PR #${{ github.event.number }} to leaderboard"
+          git push origin main
+          echo "Leaderboard update pushed successfully."
+
+      - name: Close Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Closing Pull Request to prevent submission file from entering main..."
+          gh pr close ${{ github.event.number }} --comment "✅ **Submission Scored!** 
+          
+          Your score has been recorded on the [Leaderboard](../blob/main/leaderboard/leaderboard.md).
+          This PR is now closed to keep the repository clean.
+          " --delete-branch
